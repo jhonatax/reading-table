@@ -3,6 +3,6 @@
    rules are what protect user data. Leave empty to run the site without accounts.
    Find them in Supabase: Project Settings -> API Keys / Data API. */
 window.RT_CONFIG = {
-  supabaseUrl: "",
-  supabaseKey: ""   // the "publishable" (or legacy "anon") key - NEVER the secret/service_role key
+  supabaseUrl: "https://wgevgiuhncwczqcvnobf.supabase.co",
+  supabaseKey: "sb_publishable_ydiSAgyokPiPHqARyXn13A_tuk-yR1l"   // the "publishable" (or legacy "anon") key - NEVER the secret/service_role key
 };

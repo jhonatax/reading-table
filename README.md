@@ -75,3 +75,10 @@ select book_id, count(*) from read_books group by 1 order by 2 desc limit 20;
 **Schema changes:** add a new numbered file in `supabase/migrations/` and run it in the SQL Editor — never edit one that's already been run.
 
 **Email limits:** Supabase's built-in email sender only allows a few login emails per hour. For real traffic, connect your own SMTP provider (e.g. Resend, free tier) under Authentication → Emails → SMTP Settings.
+
+**This project:** Supabase project `reading-table` (ref `wgevgiuhncwczqcvnobf`, São Paulo). The CLI is logged in on this Mac:
+```bash
+supabase db query --linked --project-ref wgevgiuhncwczqcvnobf "select count(*) from profiles"
+supabase db query --linked --project-ref wgevgiuhncwczqcvnobf -f supabase/tests/rls_check.sql   # security check
+```
+Auth settings (login-link URLs) live in `supabase/config.toml`; preview with `echo n | supabase config push --project-ref wgevgiuhncwczqcvnobf` before applying — it shows every setting it would change.
