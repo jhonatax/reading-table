@@ -24,6 +24,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check JavaScript syntax
         run: for f in js/*.js; do node --check "$f"; done
+      - name: Validate book data
+        run: python3 pipeline/build_books.py --check
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -309,3 +309,11 @@ footer.site {
   .wrap { padding: 18px 14px 60px; }
   nav.tabs button { padding: 7px 10px; font-size: 0.74rem; }
 }
+
+/* "I've read this" button on book cards */
+.book .read-btn { margin-top: 12px; align-self: flex-start; }
+details summary { cursor: pointer; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary h3::before { content: "▸ "; }
+details[open] summary h3::before { content: "▾ "; }
+footer.site a { color: var(--ink-soft); }

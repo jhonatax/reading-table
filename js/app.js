@@ -3,17 +3,24 @@
   var BOOKS = window.RT_DATA.BOOKS;
   var GENRE_LABELS = window.RT_DATA.GENRE_LABELS;
   var QUESTIONS = window.RT_DATA.QUESTIONS;
+  var Cloud = window.RTCloud || { enabled: false };
+  var BOOK_BY_ID = {};
+  BOOKS.forEach(function(b){ BOOK_BY_ID[b.id] = b; });
+  var PAGE = 12;
 
   /* ---------------------------------------------------------------
      STATE + STORAGE
+     localStorage is always the working copy. When signed in, every change
+     is also written to the user's account (Supabase).
   --------------------------------------------------------------- */
   var LS_KEY = "reading_table_v1";
+  function freshState(){ return { name:"", answers:null, group:[], read:[], onboardStep:0, draft:{} }; }
   function loadState(){
     try {
       var raw = localStorage.getItem(LS_KEY);
-      if (raw) return JSON.parse(raw);
+      if (raw){ var s = JSON.parse(raw); s.read = s.read || []; s.group = s.group || []; return s; }
     } catch(e){}
-    return { name:"", answers:null, group:[], onboardStep:0, draft:{} };
+    return freshState();
   }
   function saveState(){
     try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch(e){}
@@ -21,6 +28,29 @@
 
   var state = loadState();
   var route = state.answers ? "shelf" : "home";
+  var user = null;             // signed-in Supabase user, or null
+  var shelfLimit = PAGE, tableLimit = 10;
+  var notice = null;           // {kind:'error'|'info', text}
+  var loginSentTo = null;
+
+  // Errors from an expired/invalid login link arrive in the URL hash.
+  (function(){
+    var h = new URLSearchParams(location.hash.slice(1));
+    if (h.get('error_description')){
+      notice = { kind:'error', text: 'Login link problem: ' + h.get('error_description') + '. Request a new link.' };
+      history.replaceState(null, '', location.pathname);
+      route = 'account';
+    }
+  })();
+
+  function cloudCall(promise){
+    if (!promise) return;
+    promise.catch(function(err){
+      console.error(err);
+      notice = { kind:'error', text:"Couldn't save to your account (" + (err.message || err) + "). It's still saved on this device." };
+      render();
+    });
+  }
 
   /* ---------------------------------------------------------------
      SCORING
@@ -66,15 +96,21 @@
     return Math.max(2, Math.min(98, Math.round(s)));
   }
 
-  function personalRecs(answers, n){
-    var scored = BOOKS.map(function(b){ return { book:b, score: scoreBook(answers, b) }; });
-    scored.sort(function(x,y){ return y.score - x.score; });
-    return scored.slice(0, n || scored.length);
+  function unread(){
+    var read = {};
+    (state.read || []).forEach(function(id){ read[id] = true; });
+    return BOOKS.filter(function(b){ return !read[b.id]; });
+  }
+
+  // Ties (common with thousands of books) are broken by popularity.
+  function personalRecs(answers){
+    var scored = unread().map(function(b){ return { book:b, score: scoreBook(answers, b) }; });
+    scored.sort(function(x,y){ return (y.score - x.score) || ((y.book.pop||0) - (x.book.pop||0)); });
+    return scored;
   }
 
   function groupRecs(members){
-    // members: [{name, answers}]
-    var rows = BOOKS.map(function(b){
+    var rows = unread().map(function(b){
       var scores = members.map(function(m){ return scoreBook(m.answers, b); });
       var min = Math.min.apply(null, scores);
       var avg = scores.reduce(function(a,c){return a+c;},0) / scores.length;
@@ -82,10 +118,13 @@
       return { book:b, scores:scores, min:min, avg:Math.round(avg), group:group };
     });
     rows.sort(function(x,y){
-      if (y.group !== x.group) return y.group - x.group;
-      return y.min - x.min;
+      return (y.group - x.group) || (y.min - x.min) || ((y.book.pop||0) - (x.book.pop||0));
     });
     return rows;
+  }
+
+  function recSnapshot(){
+    return personalRecs(state.answers).slice(0, 24).map(function(r){ return { id:r.book.id, score:r.score }; });
   }
 
   /* ---------------------------------------------------------------
@@ -107,27 +146,64 @@
   }
 
   /* ---------------------------------------------------------------
+     ACCOUNT SYNC
+  --------------------------------------------------------------- */
+  // On sign-in: the account is the source of truth; anything only on this
+  // device (answers, group members, read books) is uploaded into it.
+  function syncOnSignIn(){
+    return Cloud.loadAll().then(function(cloud){
+      var uploads = [];
+      if (cloud.profile && cloud.profile.answers){
+        state.answers = cloud.profile.answers;
+        state.name = cloud.profile.display_name || state.name;
+      } else if (state.answers){
+        uploads.push(Cloud.saveProfile(user.id, state.name, state.answers, recSnapshot()));
+      }
+      var localOnly = (state.group || []).filter(function(m){ return !m.id; });
+      var cloudGroup = cloud.group.map(function(m){ return { id:m.id, name:m.name, answers:m.answers }; });
+      uploads.push(Promise.all(localOnly.map(function(m){
+        return Cloud.addMember(m).then(function(id){ cloudGroup.push({ id:id, name:m.name, answers:m.answers }); });
+      })));
+      var cloudRead = {}; cloud.read.forEach(function(id){ cloudRead[id] = true; });
+      var newRead = (state.read || []).filter(function(id){ return !cloudRead[id]; });
+      if (newRead.length) uploads.push(Cloud.markRead(newRead));
+      return Promise.all(uploads).then(function(){
+        state.group = cloudGroup;
+        state.read = cloud.read.concat(newRead);
+        saveState();
+      });
+    });
+  }
+
+  /* ---------------------------------------------------------------
      RENDER HELPERS
   --------------------------------------------------------------- */
   var app = document.getElementById("app");
-  function el(html){ var d = document.createElement("div"); d.innerHTML = html; return d.firstElementChild; }
   function esc(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){
     return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
   }); }
 
   function header(active){
+    var acct = Cloud.enabled
+      ? '<button data-nav="account" class="' + (active==='account'?'active':'') + '">' + (user ? 'Account' : 'Log in') + '</button>'
+      : '';
     return '' +
     '<header class="site">' +
       '<div class="wordmark">The Reading Table<small>A SHELF, READ BY EVERYONE</small></div>' +
       '<nav class="tabs">' +
         '<button data-nav="shelf" class="' + (active==='shelf'||active==='onboard'||active==='home'?'active':'') + '">My shelf</button>' +
         '<button data-nav="table" class="' + (active==='table'?'active':'') + '">The table</button>' +
+        acct +
       '</nav>' +
-    '</header>';
+    '</header>' +
+    (notice ? '<div class="banner ' + (notice.kind==='error'?'error':'') + '">' + esc(notice.text) +
+      ' <button class="btn ghost small" data-action="dismiss" style="margin-left:8px">OK</button></div>' : '');
   }
 
   function footer(){
-    return '<footer class="site">Recommendations are generated from a small, fixed set of books and a simple scoring rule — a starting point for the group to argue about, not a verdict.</footer>';
+    return '<footer class="site">Recommendations come from ' + BOOKS.length.toLocaleString('en-US') +
+      ' widely read books, rated by AI on pace, tone and challenge, and a simple scoring rule — a starting point for the group to argue about, not a verdict.' +
+      ' <a href="privacy.html">Privacy</a></footer>';
   }
 
   /* ---------------------------------------------------------------
@@ -140,6 +216,7 @@
       '<p class="lede">Answer a short card of questions about how you read. Once everyone in your group has done the same, The Reading Table finds books that hold up across all of you — not just the ones one person loves and the rest tolerate.</p>' +
       '<div class="btn-row">' +
         '<button class="btn" data-action="start-onboard">Fill out my card</button>' +
+        (Cloud.enabled && !user ? '<button class="btn ghost" data-nav="account">Log in to load my saved card</button>' : '') +
       '</div>' +
     '</div>' +
     footer();
@@ -190,6 +267,16 @@
     return tags.map(function(t){ return '<span>' + esc(t) + '</span>'; }).join('');
   }
 
+  function bookCard(b, i, footHtml){
+    return '<div class="book ' + (i===0?'top':'') + '">' +
+      '<div class="book-title">' + esc(b.t) + '</div>' +
+      '<div class="book-author">' + esc(b.a) + (b.y ? ' · ' + esc(b.y) : '') + '</div>' +
+      '<div class="book-tags">' + bookTagsHtml(b) + '</div>' +
+      '<div class="book-foot">' + footHtml + '</div>' +
+      '<button class="btn ghost small read-btn" data-action="mark-read" data-id="' + esc(b.id) + '" title="Already read it? It won\'t be recommended again.">I\'ve read this</button>' +
+    '</div>';
+  }
+
   function viewShelf(){
     if (!state.answers){
       return '' + header('shelf') +
@@ -197,28 +284,42 @@
       footer();
     }
     var recs = personalRecs(state.answers);
-    var top = recs.slice(0, 12);
+    var top = recs.slice(0, shelfLimit);
     var code = encodeProfile(state.name || "You", state.answers);
 
     var shelfHtml = top.map(function(r, i){
-      return '<div class="book ' + (i===0?'top':'') + '">' +
-        '<div class="book-title">' + esc(r.book.t) + '</div>' +
-        '<div class="book-author">' + esc(r.book.a) + '</div>' +
-        '<div class="book-tags">' + bookTagsHtml(r.book) + '</div>' +
-        '<div class="book-foot"><span class="stamp-score">' + r.score + '% match</span></div>' +
-      '</div>';
+      return bookCard(r.book, i, '<span class="stamp-score">' + r.score + '% match</span>');
     }).join('');
+
+    var readHtml = '';
+    if (state.read.length){
+      readHtml = '<hr class="divider"><details><summary><h3 style="display:inline">Books you\'ve read (' + state.read.length + ')</h3></summary>' +
+        '<p class="muted" style="font-size:0.88rem;margin-top:10px">These are left out of your recommendations and your group\'s picks.</p>' +
+        state.read.map(function(id){
+          var b = BOOK_BY_ID[id];
+          return '<div class="member-row"><div><div class="member-name">' + esc(b ? b.t : id) + '</div>' +
+            '<div class="member-meta">' + esc(b ? b.a : 'no longer on the shelf') + '</div></div>' +
+            '<button class="btn ghost small" data-action="unmark-read" data-id="' + esc(id) + '">Undo</button></div>';
+        }).join('') + '</details>';
+    }
+
+    var saveHint = Cloud.enabled && !user
+      ? '<div class="banner">Your card is saved on this device only. <a href="#" data-nav="account">Log in</a> to keep it in your account and use it on any device.</div>'
+      : '';
 
     return '' + header('shelf') +
     '<h1 style="font-size:1.6rem;">Your shelf</h1>' +
     '<p class="lede">Based on your card. Redo it any time — nothing here is permanent.</p>' +
+    saveHint +
     '<div class="btn-row" style="margin-bottom:8px;">' +
       '<button class="btn ghost small" data-action="start-onboard">Redo my card</button>' +
     '</div>' +
     '<div class="shelf">' + shelfHtml + '</div>' +
+    (recs.length > shelfLimit ? '<div class="btn-row" style="margin-top:18px"><button class="btn ghost" data-action="more-shelf">Show more</button></div>' : '') +
+    readHtml +
     '<hr class="divider">' +
     '<h3>Your share code</h3>' +
-    '<p class="muted" style="font-size:0.88rem;">Send this to your group chat. Anyone who pastes it into their own "The table" tab adds your taste to the group pick — no account or login needed.</p>' +
+    '<p class="muted" style="font-size:0.88rem;">Send this to your group chat. Anyone who pastes it into their own "The table" tab adds your taste to the group pick.</p>' +
     '<div class="code-box">' + esc(code) + '</div>' +
     '<div class="btn-row"><button class="btn ghost small" data-action="copy-code">Copy code</button></div>' +
     footer();
@@ -238,7 +339,8 @@
 
     var recsHtml = '';
     if (canRecommend){
-      var rows = groupRecs(group).slice(0, 10);
+      var all = groupRecs(group);
+      var rows = all.slice(0, tableLimit);
       recsHtml = '<hr class="divider"><h2>The table\'s picks</h2>' +
       '<p class="lede">Ranked by how well a book works for the person who likes it least, not just the average — so the top picks are the ones nobody in the group is likely to dread.</p>' +
       '<div class="shelf">' + rows.map(function(r, i){
@@ -246,21 +348,15 @@
           var cls = s >= 65 ? 'hi' : (s < 40 ? 'lo' : '');
           return '<i class="' + cls + '" title="' + s + '%"></i>';
         }).join('');
-        return '<div class="book ' + (i===0?'top':'') + '">' +
-          '<div class="book-title">' + esc(r.book.t) + '</div>' +
-          '<div class="book-author">' + esc(r.book.a) + '</div>' +
-          '<div class="book-tags">' + bookTagsHtml(r.book) + '</div>' +
-          '<div class="book-foot">' +
-            '<span class="stamp-score">' + r.group + '%</span>' +
-            '<span class="ticks" title="one tick per reader">' + ticks + '</span>' +
-          '</div>' +
-        '</div>';
-      }).join('') + '</div>';
+        return bookCard(r.book, i, '<span class="stamp-score">' + r.group + '%</span>' +
+          '<span class="ticks" title="one tick per reader">' + ticks + '</span>');
+      }).join('') + '</div>' +
+      (all.length > tableLimit ? '<div class="btn-row" style="margin-top:18px"><button class="btn ghost" data-action="more-table">Show more</button></div>' : '');
     }
 
     return '' + header('table') +
     '<h1 style="font-size:1.6rem;">The table</h1>' +
-    '<p class="lede">Build your group by pasting in everyone\'s share code. Everything happens on this device — add your own code too if you want yourself counted.</p>' +
+    '<p class="lede">Build your group by pasting in everyone\'s share code' + (user ? ' — your group is saved to your account.' : '. Add your own code too if you want yourself counted.') + '</p>' +
     '<div class="card">' +
       '<h3>Members (' + group.length + ')</h3>' +
       membersHtml +
@@ -281,6 +377,42 @@
     footer();
   }
 
+  function viewAccount(){
+    if (user){
+      return '' + header('account') +
+      '<h1 style="font-size:1.6rem;">Your account</h1>' +
+      '<div class="card">' +
+        '<div class="card-label type-meta">SIGNED IN AS</div>' +
+        '<h3>' + esc(user.email) + '</h3>' +
+        '<p class="muted" style="font-size:0.9rem">Your card, recommendations, group and read books are saved to this account. Log in with the same email on any device to get them back.</p>' +
+        '<div class="field"><label class="field-label">NAME SHOWN IN GROUPS</label>' +
+          '<input type="text" id="name-input" value="' + esc(state.name) + '"></div>' +
+        '<div class="btn-row">' +
+          '<button class="btn" data-action="save-name">Save name</button>' +
+          '<button class="btn ghost" data-action="logout">Log out</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<h3>Delete my saved data</h3>' +
+        '<p class="muted" style="font-size:0.9rem">Permanently removes your card, recommendations, group and read books from our database.</p>' +
+        '<button class="btn ghost" data-action="delete-data">Delete my data</button>' +
+      '</div>' +
+      footer();
+    }
+    var form = loginSentTo
+      ? '<p>We sent a login link to <strong>' + esc(loginSentTo) + '</strong>. Open it on this device to finish logging in. It can take a minute; check your spam folder too.</p>' +
+        '<button class="btn ghost small" data-action="login-retry">Use a different email</button>'
+      : '<div class="field"><label class="field-label">EMAIL</label>' +
+          '<input type="text" id="email-input" inputmode="email" autocomplete="email" placeholder="you@example.com"></div>' +
+        '<div id="login-error"></div>' +
+        '<button class="btn" data-action="send-link">Email me a login link</button>';
+    return '' + header('account') +
+    '<h1 style="font-size:1.6rem;">Log in</h1>' +
+    '<p class="lede">No password needed — we email you a link. Logging in saves your card, recommendations, group and the books you\'ve read, so you can come back to them on any device.</p>' +
+    '<div class="card">' + form + '</div>' +
+    footer();
+  }
+
   /* ---------------------------------------------------------------
      ROUTER + EVENTS
   --------------------------------------------------------------- */
@@ -290,19 +422,28 @@
     else if (route === 'onboard') html = viewOnboard();
     else if (route === 'shelf') html = viewShelf();
     else if (route === 'table') html = viewTable();
+    else if (route === 'account' && Cloud.enabled) html = viewAccount();
     else html = viewHome();
     app.innerHTML = html;
   }
 
+  function markRead(id){
+    if (state.read.indexOf(id) !== -1) return;
+    state.read.push(id);
+    saveState();
+    if (user) cloudCall(Cloud.markRead([id]));
+  }
+
   document.addEventListener('click', function(e){
     var nav = e.target.closest('[data-nav]');
-    if (nav){ route = nav.getAttribute('data-nav'); render(); return; }
+    if (nav){ e.preventDefault(); route = nav.getAttribute('data-nav'); shelfLimit = PAGE; tableLimit = 10; render(); window.scrollTo(0,0); return; }
 
     var action = e.target.closest('[data-action]');
     if (action){
       var act = action.getAttribute('data-action');
 
-      if (act === 'start-onboard'){
+      if (act === 'dismiss'){ notice = null; render(); }
+      else if (act === 'start-onboard'){
         state.onboardStep = 0;
         state.draft = state.answers ? JSON.parse(JSON.stringify(state.answers)) : {};
         route = 'onboard';
@@ -318,11 +459,13 @@
         } else {
           state.answers = state.draft;
           if (!state.name){
-            var nm = prompt("What name should show up in the group? (You can change this later.)", "");
+            var suggested = user ? user.email.split('@')[0] : "";
+            var nm = prompt("What name should show up in the group? (You can change this later.)", suggested);
             state.name = (nm || "You").trim() || "You";
           }
           saveState();
-          route = 'shelf';
+          if (user) cloudCall(Cloud.saveProfile(user.id, state.name, state.answers, recSnapshot()));
+          route = 'shelf'; shelfLimit = PAGE;
           render();
         }
       }
@@ -335,32 +478,69 @@
         action.textContent = 'Copied';
         setTimeout(function(){ action.textContent = 'Copy code'; }, 1400);
       }
-      else if (act === 'add-member'){
-        var input = document.getElementById('code-input');
+      else if (act === 'add-member' || act === 'add-self'){
         var errBox = document.getElementById('table-error');
-        errBox.innerHTML = '';
+        var profile;
         try {
-          var profile = decodeProfile(input.value);
-          state.group = state.group || [];
-          state.group.push(profile);
-          saveState();
-          input.value = '';
-          render();
+          if (act === 'add-self') profile = { name: state.name || 'You', answers: state.answers };
+          else profile = decodeProfile(document.getElementById('code-input').value);
         } catch(err){
           errBox.innerHTML = '<div class="banner error">' + esc(err.message) + '</div>';
+          return;
         }
-      }
-      else if (act === 'add-self'){
-        state.group = state.group || [];
-        state.group.push({ name: state.name || 'You', answers: state.answers });
+        state.group.push(profile);
         saveState();
+        if (user) cloudCall(Cloud.addMember(profile).then(function(id){ profile.id = id; saveState(); }));
         render();
       }
       else if (act === 'remove-member'){
         var idx = Number(action.getAttribute('data-idx'));
-        state.group.splice(idx, 1);
+        var removed = state.group.splice(idx, 1)[0];
         saveState();
+        if (user && removed && removed.id) cloudCall(Cloud.removeMember(removed.id));
         render();
+      }
+      else if (act === 'mark-read'){ markRead(action.getAttribute('data-id')); render(); }
+      else if (act === 'unmark-read'){
+        var id = action.getAttribute('data-id');
+        state.read = state.read.filter(function(x){ return x !== id; });
+        saveState();
+        if (user) cloudCall(Cloud.unmarkRead(id));
+        render();
+      }
+      else if (act === 'more-shelf'){ shelfLimit += PAGE; render(); }
+      else if (act === 'more-table'){ tableLimit += 10; render(); }
+      else if (act === 'send-link'){
+        var email = document.getElementById('email-input').value.trim();
+        var box = document.getElementById('login-error');
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){
+          box.innerHTML = '<div class="banner error">Please enter a valid email address.</div>'; return;
+        }
+        action.disabled = true; action.textContent = 'Sending…';
+        Cloud.sendLoginLink(email).then(function(){ loginSentTo = email; render(); })
+          .catch(function(err){
+            action.disabled = false; action.textContent = 'Email me a login link';
+            box.innerHTML = '<div class="banner error">Couldn\'t send the link: ' + esc(err.message || err) + '</div>';
+          });
+      }
+      else if (act === 'login-retry'){ loginSentTo = null; render(); }
+      else if (act === 'save-name'){
+        state.name = document.getElementById('name-input').value.trim() || 'You';
+        saveState();
+        if (state.answers) cloudCall(Cloud.saveProfile(user.id, state.name, state.answers, recSnapshot()));
+        notice = { kind:'info', text:'Name saved.' };
+        render();
+      }
+      else if (act === 'logout'){
+        Cloud.signOut();   // onUserChange(null) clears this device
+      }
+      else if (act === 'delete-data'){
+        if (!confirm('Delete your saved card, recommendations, group and read books? This cannot be undone.')) return;
+        Cloud.deleteMyData(user.id).then(function(){
+          state = freshState(); saveState();
+          notice = { kind:'info', text:'Your saved data was deleted.' };
+          render();
+        }).catch(function(err){ notice = { kind:'error', text:'Delete failed: ' + (err.message || err) }; render(); });
       }
       return;
     }
@@ -381,6 +561,28 @@
       render();
     }
   });
+
+  if (Cloud.enabled){
+    Cloud.onUserChange(function(u){
+      var wasSignedIn = !!user;
+      if (u && (!user || user.id !== u.id)){
+        user = u; loginSentTo = null;
+        syncOnSignIn().then(function(){
+          if (route === 'account' || route === 'home') route = state.answers ? 'shelf' : 'home';
+          render();
+        }).catch(function(err){
+          notice = { kind:'error', text:"Logged in, but couldn't load your saved data: " + (err.message || err) };
+          render();
+        });
+        render();
+      } else if (!u && wasSignedIn){
+        // Logged out: clear personal data from this device (it stays in the account).
+        user = null; state = freshState(); saveState(); route = 'home';
+        notice = { kind:'info', text:'You are logged out. Your data is still saved in your account.' };
+        render();
+      }
+    });
+  }
 
   render();
 })();
