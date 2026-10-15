@@ -2,3 +2,5 @@
 *.log
 node_modules/
 data/classify_tmp/
+__pycache__/
+*.pyc
