@@ -1,6 +1,6 @@
 # The Reading Table
 
-Find a book your whole reading group will actually enjoy. Each person fills out a short quiz, shares a code, and the app ranks ~2,200 well-known books by how well they work for the *least* enthusiastic reader.
+Find a book your whole reading group will actually enjoy. Each person fills out a short quiz, shares a code, and the app ranks ~2,180 well-known books by how well they work for the *least* enthusiastic reader.
 
 Static site (plain HTML/CSS/JS, no build tools) hosted on GitHub Pages. Optional accounts use Supabase (hosted Postgres + email login).
 
@@ -55,7 +55,7 @@ OL82563W,,4,2,1,,
 OL12345W,false,,,,,
 OL99999W,,,,,literary|history,violence
 ```
-Find a book's `id` in `data/books.csv`. Lists use `|`. Empty cells keep the AI's value.
+Find a book's `id` in `data/books.csv`. Lists use `|`. Empty cells keep the AI's value. The file also has `title`, `author`, `culture`, `format`, `pages` and a free-text `note` column (for your own reference).
 
 Field meanings: `pace` / `tone` / `challenge` are 1 (slow / light / easy) to 5 (fast / dark / hard); `length` comes from `pages` (<250 short, ≤400 medium, else long). Allowed values are listed in `pipeline/CLASSIFY.md`.
 

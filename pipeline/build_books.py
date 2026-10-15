@@ -36,7 +36,7 @@ def apply_overrides(cls):
     for r in csv.DictReader(p.open()):
         o = cls.setdefault(r["id"], {"id": r["id"]})
         for k, v in r.items():
-            if k == "id" or v is None or v == "":
+            if k in ("id", "note") or v is None or v == "":
                 continue
             if k in LIST_FIELDS: v = [x for x in v.split("|") if x]
             elif k in INT_FIELDS: v = int(v)
